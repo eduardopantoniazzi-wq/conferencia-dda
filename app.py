@@ -12,7 +12,7 @@ from datetime import date
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 st.set_page_config(page_title="Conferência DDA", page_icon="🔍", layout="wide")
-LIMIAR_NOME = 0.80
+LIMIAR_NOME = 0.75  # pode ser ajustado pelo usuário na sidebar
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -344,7 +344,7 @@ def ler_sistema(uploaded) -> pd.DataFrame:
 
 # ─── Cruzamento ───────────────────────────────────────────────────────────────
 
-def cruzar(dda: pd.DataFrame, sis: pd.DataFrame) -> list[dict]:
+def cruzar(dda: pd.DataFrame, sis: pd.DataFrame, limiar: float = LIMIAR_NOME) -> list[dict]:
     results = []
     used_sis = set()
 
@@ -356,7 +356,7 @@ def cruzar(dda: pd.DataFrame, sis: pd.DataFrame) -> list[dict]:
             if idx in used_sis:
                 continue
             sim = similaridade(d["beneficiario"], s["nome"])
-            if sim < LIMIAR_NOME:
+            if sim < limiar:
                 continue
             tol = tol_valor(max(d["valor"], s["valor"]))
             if abs(d["valor"] - s["valor"]) > tol:
@@ -479,6 +479,17 @@ def exportar_xlsx(results: list[dict]) -> bytes:
 st.title("🔍 Conferência DDA Bancário × Sistema Interno")
 st.caption("Detecção de boletos no DDA que não constam no sistema — anti-fraude")
 
+# Sidebar de configurações
+with st.sidebar:
+    st.header("⚙️ Configurações")
+    limiar_pct = st.slider(
+        "Similaridade mínima de nome (%)",
+        min_value=50, max_value=100, value=75, step=5,
+        help="Quanto os nomes precisam ser parecidos para casar. Baixe se estiver perdendo registros."
+    )
+    limiar = limiar_pct / 100.0
+    st.caption(f"Tolerância de valor: ±1% ou ±R$1,00 (o maior)")
+
 col1, col2 = st.columns(2)
 
 with col1:
@@ -488,7 +499,7 @@ with col1:
         type=["pdf", "xlsx", "xls", "csv"],
         key="dda",
     )
-    st.caption("Colunas esperadas: Data Venc. · Beneficiário Original · Valor (R$) · Seu Número")
+    st.caption("Colunas: Data Venc. · Beneficiário Original · Valor (R$) · Seu Número")
 
 with col2:
     st.subheader("📊 Sistema Interno")
@@ -497,7 +508,7 @@ with col2:
         type=["xlsx", "xls", "xlsm"],
         key="sis",
     )
-    st.caption("Colunas esperadas: Vencimento · Terceiro · Vlr. Nom. · Nota Fis.")
+    st.caption("Colunas: Vencimento · Terceiro · Vlr. Nom. · Nota Fis.")
 
 st.divider()
 
@@ -513,16 +524,27 @@ if file_dda and file_sis:
             # Lê Sistema
             sis = ler_sistema(file_sis)
 
-            if dda.empty:
-                st.error("❌ Nenhum registro extraído do DDA. Verifique o arquivo.")
-                st.stop()
-            if sis.empty:
-                st.error("❌ Nenhum registro extraído do Sistema. Verifique o arquivo.")
-                st.stop()
+        if dda.empty:
+            st.error("❌ Nenhum registro extraído do DDA. Verifique o arquivo.")
+            st.stop()
+        if sis.empty:
+            st.error("❌ Nenhum registro extraído do Sistema. Verifique o arquivo.")
+            st.stop()
 
-            st.success(f"DDA: {len(dda)} registro(s)   |   Sistema: {len(sis)} registro(s)")
+        # ── Diagnóstico ──
+        with st.expander("🔎 Diagnóstico — dados lidos (clique para ver)", expanded=False):
+            dc1, dc2 = st.columns(2)
+            with dc1:
+                st.caption("**DDA — primeiros registros lidos:**")
+                st.dataframe(dda[["beneficiario", "valor"]].head(10), use_container_width=True)
+            with dc2:
+                st.caption("**Sistema — primeiros registros lidos:**")
+                st.dataframe(sis[["nome", "valor"]].head(10), use_container_width=True)
 
-            results = cruzar(dda, sis)
+        st.success(f"DDA: {len(dda)} registro(s)   |   Sistema: {len(sis)} registro(s)   |   Limiar: {limiar_pct}%")
+
+        with st.spinner("Cruzando dados..."):
+            results = cruzar(dda, sis, limiar=limiar)
 
         # ── Resumo ──
         n_ok    = sum(1 for r in results if r["status"] == "ok")
