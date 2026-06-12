@@ -66,78 +66,98 @@ def _ler_dda_pdf(uploaded) -> pd.DataFrame:
     re_val  = re.compile(r"([\d]{1,3}(?:\.\d{3})*,\d{2})")
     re_data = re.compile(r"\d{2}[\/\-]\d{2}[\/\-]\d{4}")
 
-    rows = []
-    with pdfplumber.open(uploaded) as pdf:
-        for page in pdf.pages:
+    # índices de coluna detectados na primeira página com cabeçalho
+    bi = vi = di = si = -1
+    col_detectadas = False
 
-            # Tenta extração de tabela estruturada
+    rows_tabela = []   # resultados via extract_tables
+    rows_fallback = [] # resultados via extract_words
+
+    with pdfplumber.open(uploaded) as pdf:
+
+        # ── Tentativa 1: extração de tabela estruturada (todas as páginas) ──
+        for page in pdf.pages:
             for table in (page.extract_tables() or []):
                 if not table or len(table) < 2:
                     continue
-                # detecta índice das colunas pelo cabeçalho
-                header = [norm(str(c or "")) for c in table[0]]
-                bi = next((j for j, h in enumerate(header) if any(k in h for k in
-                           ["beneficiario", "favorecido", "nome", "sacado", "pagador"])), -1)
-                vi = next((j for j, h in enumerate(header) if "valor" in h), -1)
-                di = next((j for j, h in enumerate(header) if any(k in h for k in
-                           ["venc", "data"])), -1)
-                si = next((j for j, h in enumerate(header) if any(k in h for k in
-                           ["seu num", "seu n", "num doc", "documento"])), -1)
 
-                # se não achou pelo cabeçalho, tenta detectar pelo conteúdo das colunas
-                if bi < 0 or vi < 0:
-                    bi, vi, di, si = _detectar_cols_pdf_table(table)
+                # Verifica se a primeira linha é cabeçalho
+                primeira = [norm(str(c or "")) for c in table[0]]
+                e_cabecalho = any(k in " ".join(primeira) for k in
+                                  ["beneficiario","favorecido","nome","sacado","valor","venc"])
 
-                for row in table[1:]:
+                if e_cabecalho or not col_detectadas:
+                    # detecta colunas pelo cabeçalho
+                    b = next((j for j, h in enumerate(primeira) if any(k in h for k in
+                               ["beneficiario","favorecido","nome","sacado","pagador"])), -1)
+                    v = next((j for j, h in enumerate(primeira) if "valor" in h), -1)
+                    d = next((j for j, h in enumerate(primeira) if any(k in h for k in
+                               ["venc","data"])), -1)
+                    s = next((j for j, h in enumerate(primeira) if any(k in h for k in
+                               ["seu num","seu n","num doc","documento"])), -1)
+                    if b >= 0 and v >= 0:
+                        bi, vi, di, si = b, v, d, s
+                        col_detectadas = True
+                    elif not col_detectadas:
+                        # detecta pelo conteúdo
+                        bi, vi, di, si = _detectar_cols_pdf_table(table)
+                        col_detectadas = bi >= 0
+
+                inicio = 1 if e_cabecalho else 0
+                for row in table[inicio:]:
                     if not row: continue
                     benef = str(row[bi] or "").strip() if 0 <= bi < len(row) else ""
                     val_s = str(row[vi] or "").strip() if 0 <= vi < len(row) else ""
                     dat_s = str(row[di] or "").strip() if 0 <= di < len(row) else ""
                     snum  = str(row[si] or "").strip() if 0 <= si < len(row) else ""
-                    valor = parse_valor(re_val.search(val_s).group(1).replace(".", "").replace(",", ".") if re_val.search(val_s) else val_s)
-                    if not benef or benef in ("None", "") or not valor:
+
+                    # pula linhas de cabeçalho repetido
+                    if any(k in norm(benef) for k in ["beneficiario","favorecido","nome","sacado"]):
                         continue
+
+                    vm = re_val.search(val_s)
+                    valor = parse_valor(vm.group(1).replace(".", "").replace(",", ".")) if vm else parse_valor(val_s)
+                    if not benef or benef in ("None","") or not valor:
+                        continue
+
                     dm = re_data.search(dat_s)
-                    rows.append({"beneficiario": benef, "valor": valor,
-                                 "data": _fmt_iso(dm.group() if dm else ""),
-                                 "seuNum": _norm_snum(snum)})
+                    rows_tabela.append({"beneficiario": benef, "valor": valor,
+                                        "data": _fmt_iso(dm.group() if dm else ""),
+                                        "seuNum": _norm_snum(snum)})
 
-            if rows:
-                break  # tabela estruturada funcionou
+        # ── Tentativa 2: fallback por palavras (todas as páginas) ──
+        if not rows_tabela:
+            with pdfplumber.open(uploaded) as pdf2:
+                for page in pdf2.pages:
+                    words = page.extract_words(x_tolerance=4, y_tolerance=4) or []
+                    linhas: dict[int, list] = {}
+                    for w in words:
+                        k = round(w["top"] / 5) * 5
+                        linhas.setdefault(k, []).append(w)
 
-        if not rows:
-            # Fallback: extrai palavras e agrupa por linha
-            for page in pdf.pages:
-                words = page.extract_words(x_tolerance=4, y_tolerance=4) or []
-                linhas: dict[int, list] = {}
-                for w in words:
-                    k = round(w["top"] / 5) * 5
-                    linhas.setdefault(k, []).append(w)
+                    for k in sorted(linhas):
+                        ws_line = sorted(linhas[k], key=lambda w: w["x0"])
+                        texts = [w["text"] for w in ws_line]
+                        full  = " ".join(texts)
 
-                for k in sorted(linhas):
-                    ws_line = sorted(linhas[k], key=lambda w: w["x0"])
-                    texts = [w["text"] for w in ws_line]
-                    full  = " ".join(texts)
+                        vm = re_val.search(full)
+                        if not vm: continue
+                        valor = parse_valor(vm.group(1).replace(".", "").replace(",", "."))
+                        if not valor: continue
 
-                    vm = re_val.search(full)
-                    if not vm: continue
-                    valor = parse_valor(vm.group(1).replace(".", "").replace(",", "."))
-                    if not valor: continue
+                        dm = re_data.search(full)
+                        cands = [t for t in texts if len(t) > 4
+                                 and not re_val.search(t) and not re_data.search(t)
+                                 and not re.match(r"^\d+$", t)]
+                        benef = max(cands, key=len) if cands else ""
+                        if len(benef) < 4: continue
 
-                    dm = re_data.search(full)
-                    data = _fmt_iso(dm.group() if dm else "")
+                        sn = next((t for t in texts if re.match(r"^\d{6,}$", t)), "")
+                        rows_fallback.append({"beneficiario": benef, "valor": valor,
+                                              "data": _fmt_iso(dm.group() if dm else ""),
+                                              "seuNum": _norm_snum(sn)})
 
-                    # beneficiário: token mais longo que não seja data nem valor
-                    cands = [t for t in texts if len(t) > 4
-                             and not re_val.search(t) and not re_data.search(t)
-                             and not re.match(r"^\d+$", t)]
-                    benef = max(cands, key=len) if cands else ""
-                    if len(benef) < 4: continue
-
-                    sn = next((t for t in texts if re.match(r"^\d{6,}$", t)), "")
-                    rows.append({"beneficiario": benef, "valor": valor,
-                                 "data": data, "seuNum": _norm_snum(sn)})
-
+    rows = rows_tabela or rows_fallback
     return pd.DataFrame(rows) if rows else pd.DataFrame(
         columns=["beneficiario", "valor", "data", "seuNum"])
 
