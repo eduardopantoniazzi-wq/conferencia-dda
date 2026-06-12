@@ -90,15 +90,67 @@ def fmt_data(d) -> str:
 
 # ─── Leitores ──────────────────────────────────────────────────────────────────
 
-def ler_dda_excel(uploaded) -> pd.DataFrame:
+def _parse_data_str(ds: str) -> str | None:
+    ds = str(ds).strip()
+    m = re.match(r"(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})", ds)
+    if m:
+        a, b2, y = int(m.group(1)), int(m.group(2)), m.group(3)
+        if a > 12:
+            return f"{y}-{str(b2).zfill(2)}-{str(a).zfill(2)}"
+        return f"{y}-{str(a).zfill(2)}-{str(b2).zfill(2)}"
+    m2 = re.match(r"(\d{4})[\/\-](\d{2})[\/\-](\d{2})", ds)
+    if m2:
+        return ds[:10]
+    return None
+
+
+def _detectar_colunas_por_conteudo(df_data: pd.DataFrame):
+    """Detecta colunas por padrão de conteúdo quando os cabeçalhos não batem."""
+    re_val  = re.compile(r"^\s*R?\$?\s*[\d.]+,\d{2}\s*$")
+    re_data = re.compile(r"\d{2}[\/\-]\d{2}[\/\-]\d{4}|\d{4}[\/\-]\d{2}[\/\-]\d{2}")
+    re_num  = re.compile(r"^\s*\d{5,}\s*$")
+
+    sample = df_data.head(20)
+    n_cols = len(df_data.columns)
+
+    score_val  = []
+    score_data = []
+    score_nome = []
+    score_snum = []
+
+    for col in range(n_cols):
+        vals = sample.iloc[:, col].astype(str)
+        sv = sum(1 for v in vals if re_val.search(v) and v.strip() not in ("nan",""))
+        sd = sum(1 for v in vals if re_data.search(v) and v.strip() not in ("nan",""))
+        sn = sum(1 for v in vals if len(v.strip()) > 8 and not re_val.search(v)
+                 and not re_data.search(v) and not re_num.match(v)
+                 and v.strip() not in ("nan","") and not v.strip().isdigit())
+        ss = sum(1 for v in vals if re_num.match(v.strip()))
+        score_val.append(sv); score_data.append(sd)
+        score_nome.append(sn); score_snum.append(ss)
+
+    ci = int(pd.Series(score_data).idxmax()) if max(score_data) > 0 else -1
+    vi = int(pd.Series(score_val).idxmax())  if max(score_val)  > 0 else -1
+    # para nome: maior score mas que não seja data nem valor nem seu número
+    excluir = {ci, vi}
+    nome_scores = [(j, s) for j, s in enumerate(score_nome) if j not in excluir]
+    bi = max(nome_scores, key=lambda x: x[1])[0] if nome_scores else -1
+    snum_scores = [(j, s) for j, s in enumerate(score_snum) if j not in excluir and j != bi]
+    si = max(snum_scores, key=lambda x: x[1])[0] if snum_scores and max(s for _,s in snum_scores) > 0 else -1
+
+    return ci, bi, vi, si
+
+
+def ler_dda_excel(uploaded) -> tuple[pd.DataFrame, dict]:
     df_raw = pd.read_excel(uploaded, header=None, dtype=str, engine="openpyxl")
-    K_DATA  = ["data venc", "vencimento", "dt venc", "venc"]
-    K_BENEF = ["beneficiario original", "beneficiario", "favorecido", "nome"]
+    K_DATA  = ["data venc", "vencimento", "dt venc", "venc", "data"]
+    K_BENEF = ["beneficiario original", "beneficiario", "favorecido", "nome", "sacado", "pagador"]
     K_VAL   = ["valor (r$)", "valor r$", "valor"]
-    K_SNUM  = ["seu numero", "seu num", "seu n"]
+    K_SNUM  = ["seu numero", "seu num", "seu n", "numero doc", "num doc", "documento"]
 
     header_row = None
     ci = bi = vi = si = -1
+    header_cols = []
 
     for i, row in df_raw.iterrows():
         r = [norm(str(c)) for c in row]
@@ -108,42 +160,38 @@ def ler_dda_excel(uploaded) -> pd.DataFrame:
         sii = next((j for j, c in enumerate(r) if any(k in c for k in K_SNUM)),  -1)
         if di >= 0 and bii >= 0 and vii >= 0:
             header_row = i; ci = di; bi = bii; vi = vii; si = sii
+            header_cols = list(row)
             break
 
+    info = {}
     if header_row is None:
-        st.warning("DDA Excel: cabeçalho não detectado — assumindo colunas 0,1,2")
-        header_row = 0; ci = 0; bi = 1; vi = 2; si = -1
+        # fallback: detecta por conteúdo
+        ci2, bi2, vi2, si2 = _detectar_colunas_por_conteudo(df_raw)
+        ci, bi, vi, si = ci2, bi2, vi2, si2
+        header_row = 0
+        info["aviso"] = "Cabeçalho de DDA não reconhecido — colunas detectadas pelo conteúdo"
+        info["colunas_brutas"] = list(df_raw.iloc[0])
+    else:
+        info["colunas_brutas"] = header_cols
+
+    info["col_data"] = ci; info["col_benef"] = bi
+    info["col_valor"] = vi; info["col_snum"] = si
 
     regs = []
     for _, row in df_raw.iloc[header_row + 1:].iterrows():
         vals = list(row)
-        benef = str(vals[bi]).strip() if bi < len(vals) else ""
-        valor = parse_valor(vals[vi]) if vi < len(vals) else None
-        data_raw = vals[ci] if ci < len(vals) else None
-        seu_num  = norm_seu_num(vals[si]) if si >= 0 and si < len(vals) else None
+        benef   = str(vals[bi]).strip() if 0 <= bi < len(vals) else ""
+        valor   = parse_valor(vals[vi]) if 0 <= vi < len(vals) else None
+        data_raw = str(vals[ci]).strip() if 0 <= ci < len(vals) else ""
+        seu_num  = norm_seu_num(vals[si]) if 0 <= si < len(vals) else None
 
         if not benef or benef in ("nan", "") or valor is None or valor <= 0:
             continue
 
-        # parse data
-        data = None
-        if data_raw and str(data_raw) not in ("nan", ""):
-            ds = str(data_raw).strip()
-            m = re.match(r"(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})", ds)
-            if m:
-                a, b2, y = int(m.group(1)), int(m.group(2)), m.group(3)
-                if a > 12:
-                    data = f"{y}-{str(b2).zfill(2)}-{str(a).zfill(2)}"
-                else:
-                    data = f"{y}-{str(a).zfill(2)}-{str(b2).zfill(2)}"
-            else:
-                m2 = re.match(r"(\d{4})[\/\-](\d{2})[\/\-](\d{2})", ds)
-                if m2:
-                    data = ds[:10]
-
+        data = _parse_data_str(data_raw) if data_raw and data_raw != "nan" else None
         regs.append({"data": data, "beneficiario": benef, "valor": valor, "seuNum": seu_num})
 
-    return pd.DataFrame(regs)
+    return pd.DataFrame(regs), info
 
 
 def ler_dda_pdf(uploaded) -> pd.DataFrame:
@@ -516,30 +564,48 @@ if file_dda and file_sis:
     if st.button("🔍 Conferir", type="primary", use_container_width=True):
         with st.spinner("Lendo arquivos e cruzando dados..."):
             # Lê DDA
+            dda_info = {}
             if file_dda.name.lower().endswith(".pdf"):
                 dda = ler_dda_pdf(file_dda)
             else:
-                dda = ler_dda_excel(file_dda)
+                dda, dda_info = ler_dda_excel(file_dda)
 
             # Lê Sistema
             sis = ler_sistema(file_sis)
 
         if dda.empty:
             st.error("❌ Nenhum registro extraído do DDA. Verifique o arquivo.")
+            if dda_info.get("colunas_brutas"):
+                st.info(f"Colunas encontradas no DDA: {dda_info['colunas_brutas']}")
             st.stop()
         if sis.empty:
             st.error("❌ Nenhum registro extraído do Sistema. Verifique o arquivo.")
             st.stop()
 
         # ── Diagnóstico ──
-        with st.expander("🔎 Diagnóstico — dados lidos (clique para ver)", expanded=False):
+        with st.expander("🔎 Diagnóstico — dados lidos (clique para ver)", expanded=True):
+            if dda_info.get("aviso"):
+                st.warning(dda_info["aviso"])
+            cols_info = dda_info.get("colunas_brutas", [])
+            ci_d = dda_info.get("col_data", -1)
+            bi_d = dda_info.get("col_benef", -1)
+            vi_d = dda_info.get("col_valor", -1)
+            si_d = dda_info.get("col_snum", -1)
+            if cols_info:
+                st.caption(f"**Cabeçalhos DDA:** {cols_info}")
+                st.caption(
+                    f"Colunas detectadas → Data: col {ci_d} `{cols_info[ci_d] if 0<=ci_d<len(cols_info) else '?'}`  |  "
+                    f"Beneficiário: col {bi_d} `{cols_info[bi_d] if 0<=bi_d<len(cols_info) else '?'}`  |  "
+                    f"Valor: col {vi_d} `{cols_info[vi_d] if 0<=vi_d<len(cols_info) else '?'}`  |  "
+                    f"Seu Nº: col {si_d} `{cols_info[si_d] if 0<=si_d<len(cols_info) else 'não encontrado'}`"
+                )
             dc1, dc2 = st.columns(2)
             with dc1:
-                st.caption("**DDA — primeiros registros lidos:**")
-                st.dataframe(dda[["beneficiario", "valor"]].head(10), use_container_width=True)
+                st.caption("**DDA — beneficiário e valor lidos:**")
+                st.dataframe(dda[["beneficiario", "valor"]].head(15), use_container_width=True)
             with dc2:
-                st.caption("**Sistema — primeiros registros lidos:**")
-                st.dataframe(sis[["nome", "valor"]].head(10), use_container_width=True)
+                st.caption("**Sistema — terceiro e valor lidos:**")
+                st.dataframe(sis[["nome", "valor"]].head(15), use_container_width=True)
 
         st.success(f"DDA: {len(dda)} registro(s)   |   Sistema: {len(sis)} registro(s)   |   Limiar: {limiar_pct}%")
 
