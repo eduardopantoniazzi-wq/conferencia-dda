@@ -91,7 +91,7 @@ def fmt_data(d) -> str:
 # ─── Leitores ──────────────────────────────────────────────────────────────────
 
 def ler_dda_excel(uploaded) -> pd.DataFrame:
-    df_raw = pd.read_excel(uploaded, header=None, dtype=str)
+    df_raw = pd.read_excel(uploaded, header=None, dtype=str, engine="openpyxl")
     K_DATA  = ["data venc", "vencimento", "dt venc", "venc"]
     K_BENEF = ["beneficiario original", "beneficiario", "favorecido", "nome"]
     K_VAL   = ["valor (r$)", "valor r$", "valor"]
@@ -291,7 +291,7 @@ def ler_dda_pdf(uploaded) -> pd.DataFrame:
 
 
 def ler_sistema(uploaded) -> pd.DataFrame:
-    df_raw = pd.read_excel(uploaded, header=None, dtype=str)
+    df_raw = pd.read_excel(uploaded, header=None, dtype=str, engine="openpyxl")
     K_DATA  = ["vencimento", "venc", "data"]
     K_NOME  = ["terceiro", "nome", "fornecedor"]
     K_VAL   = ["vlr. nom", "vlr nom", "valor nominal", "valor"]
@@ -494,7 +494,7 @@ with col2:
     st.subheader("📊 Sistema Interno")
     file_sis = st.file_uploader(
         "Arraste ou selecione o relatório do sistema",
-        type=["xlsx", "xls"],
+        type=["xlsx", "xls", "xlsm"],
         key="sis",
     )
     st.caption("Colunas esperadas: Vencimento · Terceiro · Vlr. Nom. · Nota Fis.")
